@@ -18,10 +18,12 @@ package pebble
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"sync"
 
-	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/sstable"
 	"github.com/lni/goutils/syncutil"
 
 	"github.com/lni/dragonboat/v4/config"
@@ -127,10 +129,36 @@ func (pebbleLogger) Infof(format string, args ...interface{}) {
 	pebble.DefaultLogger.Infof(format, args...)
 }
 
-func (pebbleLogger) Fatalf(format string, args ...interface{}) {
-	pebble.DefaultLogger.Infof(format, args...)
-	panic(fmt.Errorf(format, args...))
+func (pebbleLogger) Errorf(format string, args ...interface{}) {
+	pebble.DefaultLogger.Errorf(format, args...)
 }
+
+func (pebbleLogger) Fatalf(format string, args ...interface{}) {
+	pebble.DefaultLogger.Errorf(format, args...)
+	panic(fatalError(format, args))
+}
+
+// fatalError formats a fatal pebble message, keeping its error arguments in
+// the chain: pebble v2 reports a failed commit through Fatalf rather than
+// returning it, and callers match the cause, e.g. an injected I/O error.
+func fatalError(format string, args []interface{}) error {
+	var causes []error
+	for _, arg := range args {
+		if err, ok := arg.(error); ok {
+			causes = append(causes, err)
+		}
+	}
+	return &pebbleFatalError{msg: fmt.Sprintf(format, args...), causes: causes}
+}
+
+type pebbleFatalError struct {
+	msg    string
+	causes []error
+}
+
+func (e *pebbleFatalError) Error() string { return e.msg }
+
+func (e *pebbleFatalError) Unwrap() []error { return e.causes }
 
 // NewKVStore returns a pebble based IKVStore instance.
 func NewKVStore(config config.LogDBConfig, callback kv.LogDBCallback,
@@ -174,16 +202,19 @@ func openPebbleDB(config config.LogDBConfig, callback kv.LogDBCallback,
 	cacheSize := int64(config.KVLRUCacheSize)
 	levelSizeMultiplier := int64(config.KVTargetFileSizeMultiplier)
 	numOfLevels := int64(config.KVNumOfLevels)
-	lopts := make([]pebble.LevelOptions, 0)
+	var lopts [len(pebble.Options{}.Levels)]pebble.LevelOptions
+	var targetFileSizes [len(lopts)]int64
+	noCompression := func() *sstable.CompressionProfile {
+		return sstable.NoCompression
+	}
 	sz := targetFileSizeBase
-	for l := int64(0); l < numOfLevels; l++ {
-		opt := pebble.LevelOptions{
-			Compression:    pebble.NoCompression,
-			BlockSize:      blockSize,
-			TargetFileSize: sz,
+	for l := 0; l < len(lopts) && int64(l) < numOfLevels; l++ {
+		lopts[l] = pebble.LevelOptions{
+			Compression: noCompression,
+			BlockSize:   blockSize,
 		}
+		targetFileSizes[l] = sz
 		sz = sz * levelSizeMultiplier
-		lopts = append(lopts, opt)
 	}
 	if inMonkeyTesting {
 		writeBufferSize = 1024 * 1024 * 4
@@ -193,8 +224,9 @@ func openPebbleDB(config config.LogDBConfig, callback kv.LogDBCallback,
 	wo := &pebble.WriteOptions{Sync: true}
 	opts := &pebble.Options{
 		Levels:                      lopts,
+		TargetFileSizes:             targetFileSizes,
 		MaxManifestFileSize:         maxLogFileSize,
-		MemTableSize:                writeBufferSize,
+		MemTableSize:                uint64(writeBufferSize),
 		MemTableStopWritesThreshold: maxWriteBufferNumber,
 		LBaseMaxBytes:               maxBytesForLevelBase,
 		L0CompactionFileThreshold:   l0FileNumCompactionTrigger,
@@ -217,7 +249,7 @@ func openPebbleDB(config config.LogDBConfig, callback kv.LogDBCallback,
 		kv:      kv,
 		stopper: syncutil.NewStopper(),
 	}
-	opts.EventListener = pebble.EventListener{
+	opts.EventListener = &pebble.EventListener{
 		WALCreated:    event.onWALCreated,
 		FlushEnd:      event.onFlushEnd,
 		CompactionEnd: event.onCompactionEnd,
@@ -277,7 +309,10 @@ func iteratorIsValid(iter *pebble.Iterator) bool {
 // IterateValue ...
 func (r *KV) IterateValue(fk []byte, lk []byte, inc bool,
 	op func(key []byte, data []byte) (bool, error)) (err error) {
-	iter := r.db.NewIter(r.ro)
+	iter, err := r.db.NewIter(r.ro)
+	if err != nil {
+		return err
+	}
 	defer func() {
 		err = firstError(err, iter.Close())
 	}()
@@ -363,7 +398,7 @@ func (r *KV) BulkRemoveEntries(fk []byte, lk []byte) (err error) {
 
 // CompactEntries ...
 func (r *KV) CompactEntries(fk []byte, lk []byte) error {
-	return r.db.Compact(fk, lk, false)
+	return r.db.Compact(context.Background(), fk, lk, false)
 }
 
 // FullCompaction ...
@@ -374,5 +409,5 @@ func (r *KV) FullCompaction() error {
 		fk[i] = 0
 		lk[i] = 0xFF
 	}
-	return r.db.Compact(fk, lk, false)
+	return r.db.Compact(context.Background(), fk, lk, false)
 }

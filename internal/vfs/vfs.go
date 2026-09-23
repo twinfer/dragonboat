@@ -15,13 +15,14 @@
 package vfs
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/cockroachdb/errors/oserror"
-	pvfs "github.com/cockroachdb/pebble/vfs"
+	pvfs "github.com/cockroachdb/pebble/v2/vfs"
 
 	gvfs "github.com/lni/vfs"
 )
@@ -69,8 +70,9 @@ func (p *PebbleFS) GetDiskUsage(path string) (pvfs.DiskUsage, error) {
 }
 
 // Create ...
-func (p *PebbleFS) Create(name string) (pvfs.File, error) {
-	return p.fs.Create(name)
+func (p *PebbleFS) Create(name string,
+	_ pvfs.DiskWriteCategory) (pvfs.File, error) {
+	return wrapFile(p.fs.Create(name))
 }
 
 // Link ...
@@ -80,7 +82,7 @@ func (p *PebbleFS) Link(oldname, newname string) error {
 
 // Open ...
 func (p *PebbleFS) Open(name string, opts ...pvfs.OpenOption) (pvfs.File, error) {
-	f, err := p.fs.Open(name)
+	f, err := wrapFile(p.fs.Open(name))
 	if err != nil {
 		return nil, err
 	}
@@ -90,9 +92,16 @@ func (p *PebbleFS) Open(name string, opts ...pvfs.OpenOption) (pvfs.File, error)
 	return f, nil
 }
 
+// OpenReadWrite is not supported: pebble only uses it for its shared object
+// cache, which dragonboat does not configure.
+func (p *PebbleFS) OpenReadWrite(name string, _ pvfs.DiskWriteCategory,
+	_ ...pvfs.OpenOption) (pvfs.File, error) {
+	return nil, errors.New("vfs: OpenReadWrite is not supported")
+}
+
 // OpenDir ...
 func (p *PebbleFS) OpenDir(name string) (pvfs.File, error) {
-	return p.fs.OpenDir(name)
+	return wrapFile(p.fs.OpenDir(name))
 }
 
 // Remove ...
@@ -111,8 +120,9 @@ func (p *PebbleFS) Rename(oldname, newname string) error {
 }
 
 // ReuseForWrite ...
-func (p *PebbleFS) ReuseForWrite(oldname, newname string) (pvfs.File, error) {
-	return p.fs.ReuseForWrite(oldname, newname)
+func (p *PebbleFS) ReuseForWrite(oldname, newname string,
+	_ pvfs.DiskWriteCategory) (pvfs.File, error) {
+	return wrapFile(p.fs.ReuseForWrite(oldname, newname))
 }
 
 // MkdirAll ...
@@ -131,8 +141,8 @@ func (p *PebbleFS) List(dir string) ([]string, error) {
 }
 
 // Stat ...
-func (p *PebbleFS) Stat(name string) (os.FileInfo, error) {
-	return p.fs.Stat(name)
+func (p *PebbleFS) Stat(name string) (pvfs.FileInfo, error) {
+	return wrapFileInfo(p.fs.Stat(name))
 }
 
 // PathBase ...
@@ -148,6 +158,74 @@ func (p *PebbleFS) PathJoin(elem ...string) string {
 // PathDir ...
 func (p *PebbleFS) PathDir(path string) string {
 	return p.fs.PathDir(path)
+}
+
+// Unwrap ...
+func (p *PebbleFS) Unwrap() pvfs.FS {
+	return nil
+}
+
+// pebbleFile adapts a File to the pebble/vfs.File interface. The hints
+// pebble v2 added (prefetch, preallocation, partial syncs) fall back to
+// no-ops or full syncs.
+type pebbleFile struct {
+	File
+}
+
+var _ pvfs.File = (*pebbleFile)(nil)
+
+func wrapFile(f File, err error) (pvfs.File, error) {
+	if err != nil {
+		return nil, err
+	}
+	return &pebbleFile{f}, nil
+}
+
+// Stat ...
+func (f *pebbleFile) Stat() (pvfs.FileInfo, error) {
+	return wrapFileInfo(f.File.Stat())
+}
+
+// Preallocate ...
+func (f *pebbleFile) Preallocate(offset, length int64) error {
+	return nil
+}
+
+// SyncTo ...
+func (f *pebbleFile) SyncTo(length int64) (bool, error) {
+	return true, f.Sync()
+}
+
+// SyncData ...
+func (f *pebbleFile) SyncData() error {
+	return f.Sync()
+}
+
+// Prefetch ...
+func (f *pebbleFile) Prefetch(offset int64, length int64) error {
+	return nil
+}
+
+// Fd ...
+func (f *pebbleFile) Fd() uintptr {
+	return pvfs.InvalidFd
+}
+
+// pebbleFileInfo adapts an os.FileInfo to the pebble/vfs.FileInfo interface.
+type pebbleFileInfo struct {
+	os.FileInfo
+}
+
+func wrapFileInfo(fi os.FileInfo, err error) (pvfs.FileInfo, error) {
+	if err != nil {
+		return nil, err
+	}
+	return pebbleFileInfo{fi}, nil
+}
+
+// DeviceID ...
+func (pebbleFileInfo) DeviceID() pvfs.DeviceID {
+	return pvfs.DeviceID{}
 }
 
 // IsNotExist returns a boolean value indicating whether the specified error is

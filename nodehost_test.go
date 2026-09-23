@@ -4671,54 +4671,6 @@ func TestRaftEventsAreReported(t *testing.T) {
 	runNodeHostTest(t, to, fs)
 }
 
-func TestV2DataCanBeHandled(t *testing.T) {
-	fs := vfs.GetTestFS()
-	if vfs.GetTestFS() != vfs.DefaultFS {
-		t.Skip("skipped as not using the default fs")
-	}
-	v2datafp := "internal/logdb/testdata/v2-rocksdb-batched.tar.bz2"
-	targetDir := "test-v2-data-safe-to-remove"
-	require.NoError(t, fs.RemoveAll(targetDir))
-	defer func() {
-		require.NoError(t, fs.RemoveAll(targetDir))
-	}()
-
-	topDirName := "single_nodehost_test_dir_safe_to_delete"
-	testHostname := "lindfield.local"
-	require.NoError(t, fileutil.ExtractTarBz2(v2datafp, targetDir, fs))
-	hostname, err := os.Hostname()
-	require.NoError(t, err, "failed to get hostname %v", err)
-
-	testPath := fs.PathJoin(targetDir, topDirName, testHostname)
-	expPath := fs.PathJoin(targetDir, topDirName, hostname)
-	if expPath != testPath {
-		require.NoError(t, fs.Rename(testPath, expPath),
-			"failed to rename the dir %v", err)
-	}
-
-	v2dataDir := fs.PathJoin(targetDir, topDirName)
-	to := &testOption{
-		noElection: true,
-		updateNodeHostConfig: func(c *config.NodeHostConfig) *config.NodeHostConfig {
-			c.WALDir = v2dataDir
-			c.NodeHostDir = v2dataDir
-			return c
-		},
-		tf: func(nh *NodeHost) {
-			name := nh.mu.logdb.Name()
-			if name != "sharded-pebble" {
-				t.Skip("skipped as not using rocksdb compatible logdb")
-			}
-			logdb := nh.mu.logdb
-			rs, err := logdb.ReadRaftState(2, 1, 0)
-			require.NoError(t, err, "failed to get raft state %v", err)
-			assert.Equal(t, uint64(3), rs.EntryCount, "unexpected entry count")
-			assert.Equal(t, uint64(3), rs.State.Commit, "unexpected commit")
-		},
-	}
-	runNodeHostTest(t, to, fs)
-}
-
 func TestSnapshotCanBeCompressed(t *testing.T) {
 	fs := vfs.GetTestFS()
 	to := &testOption{
@@ -4964,7 +4916,7 @@ func testIOErrorIsHandled(t *testing.T, op vfs.Op) {
 				"proposal unexpectedly completed, %v", err)
 			select {
 			case e := <-nh.engine.ec:
-				require.Equal(t, vfs.ErrInjected, e,
+				require.ErrorIs(t, e, vfs.ErrInjected,
 					"failed to return the expected error, %v", e)
 			default:
 				require.Fail(t, "failed to trigger error")

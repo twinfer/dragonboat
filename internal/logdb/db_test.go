@@ -45,6 +45,10 @@ func getDirSize(path string,
 	}
 	for _, v := range results {
 		info, err := fs.Stat(fs.PathJoin(path, v))
+		if vfs.IsNotExist(err) {
+			// pebble deletes obsolete files in the background
+			continue
+		}
 		if err != nil {
 			return 0, err
 		}

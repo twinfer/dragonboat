@@ -256,9 +256,14 @@ func checkImportSettings(nhConfig config.NodeHostConfig,
 		plog.Errorf("node ID not found in the memberNode map")
 		return ErrInvalidMembers
 	}
-	if nhConfig.RaftAddress != addr {
+	// with the node registry, replicas are addressed by NodeHostID
+	self := nhConfig.RaftAddress
+	if nhConfig.DefaultNodeRegistryEnabled {
+		self = nhConfig.NodeHostID
+	}
+	if self != addr {
 		plog.Errorf("node address in NodeHostConfig %s, in members %s",
-			nhConfig.RaftAddress, addr)
+			self, addr)
 		return ErrInvalidMembers
 	}
 	return nil

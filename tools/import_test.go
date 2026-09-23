@@ -46,6 +46,19 @@ func TestCheckImportSettings(t *testing.T) {
 	err = checkImportSettings(config.NodeHostConfig{RaftAddress: "a1"},
 		members, 1)
 	require.NoError(t, err)
+
+	// with the node registry, members are addressed by NodeHostID
+	nhid := "00000000-0000-0000-0000-000000000001"
+	registry := config.NodeHostConfig{
+		RaftAddress:                "a1",
+		NodeHostID:                 nhid,
+		DefaultNodeRegistryEnabled: true,
+	}
+	err = checkImportSettings(registry, members, 1)
+	require.Equal(t, ErrInvalidMembers, err, "raft address accepted as a NodeHostID")
+	members[1] = nhid
+	err = checkImportSettings(registry, members, 1)
+	require.NoError(t, err)
 }
 
 func TestGetSnapshotFilenames(t *testing.T) {
